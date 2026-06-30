@@ -115,11 +115,13 @@
   </header>
 
   <div class="search-row">
-    <input type="text" id="city-input" placeholder="Search a city — e.g. Jammu, Tokyo, New York..." autocomplete="off">
-    <button id="search-btn">Search</button>
-    <button id="geo-btn" class="geo-btn">Use my location</button>
+    <input type="text" id="city-input" aria-label="City name" placeholder="Search a city — e.g. Jammu, Tokyo, New York..." autocomplete="off">
+    <button id="search-btn" title="Search for city">Search</button>
+    <button id="geo-btn" class="geo-btn" title="Use my location">Use my location</button>
+    <button id="unit-toggle" title="Toggle °C / °F">°C</button>
+    <button id="share-btn" title="Copy link to share">Share</button>
   </div>
-  <div class="status-line" id="status-line">Loading default city…</div>
+  <div class="status-line" id="status-line" aria-live="polite">Loading default city…</div>
 
   <div class="hero" id="hero">
     <div>
@@ -131,6 +133,8 @@
         <div>Humidity<b id="humidity">--%</b></div>
         <div>Wind<b id="wind">-- km/h</b></div>
         <div>UV Index<b id="uv">--</b></div>
+        <div>Sunrise<b id="sunrise">--:--</b></div>
+        <div>Sunset<b id="sunset">--:--</b></div>
       </div>
     </div>
     <div class="hero-icon" id="hero-icon">⛅</div>
@@ -167,6 +171,12 @@
 
   var statusEl = document.getElementById('status-line');
   var cityInput = document.getElementById('city-input');
+  var UNIT = localStorage.getItem('unit') || 'C'; // 'C' or 'F'
+  var unitBtn = document.getElementById('unit-toggle');
+
+  // Keep last data for re-render when units change
+  window.__lastWeatherData = null;
+  window.__lastLabel = null;
 
   function setStatus(msg, isError){
     statusEl.textContent = msg;
@@ -181,9 +191,15 @@
   tickClock();
   setInterval(tickClock, 1000);
 
+  function fetchWithTimeout(url, timeoutMs){
+    var controller = new AbortController();
+    var id = setTimeout(function(){ controller.abort(); }, timeoutMs || 10000);
+    return fetch(url, { signal: controller.signal }).finally(function(){ clearTimeout(id); });
+  }
+
   function geocodeCity(name){
     var url = "https://geocoding-api.open-meteo.com/v1/search?name=" + encodeURIComponent(name) + "&count=1&language=en&format=json";
-    return fetch(url)
+    return fetchWithTimeout(url, 10000)
       .then(function(res){
         if(!res.ok) throw new Error('Geocoding service unavailable');
         return res.json();
@@ -199,25 +215,55 @@
     var url = "https://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon +
       "&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,uv_index" +
       "&hourly=temperature_2m,weather_code,precipitation_probability" +
-      "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max" +
+      "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset" +
       "&timezone=auto&forecast_days=7";
-    return fetch(url).then(function(res){
+    return fetchWithTimeout(url, 10000).then(function(res){
       if(!res.ok) throw new Error('Forecast service unavailable');
       return res.json();
     });
   }
 
+  function convertTemp(celsius){
+    return (UNIT === 'C') ? celsius : (celsius * 9/5) + 32;
+  }
+  function displayNumber(celsius){
+    return Math.round(convertTemp(celsius));
+  }
+  function updateUnitUI(){
+    unitBtn.textContent = (UNIT === 'C') ? '°C' : '°F';
+  }
+  updateUnitUI();
+
+  unitBtn.addEventListener('click', function(){
+    UNIT = (UNIT === 'C') ? 'F' : 'C';
+    localStorage.setItem('unit', UNIT);
+    updateUnitUI();
+    if(window.__lastWeatherData && window.__lastLabel){
+      renderHero(window.__lastLabel, window.__lastWeatherData);
+      renderHourly(window.__lastWeatherData);
+      renderDaily(window.__lastWeatherData);
+    }
+  });
+
   function renderHero(label, data){
     document.getElementById('loc-name').textContent = label;
     var c = data.current;
     var info = wmoInfo(c.weather_code);
-    document.getElementById('hero-temp').innerHTML = Math.round(c.temperature_2m) + '<sup>°C</sup>';
+    document.getElementById('hero-temp').innerHTML = displayNumber(c.temperature_2m) + '<sup>°' + UNIT + '</sup>';
     document.getElementById('hero-desc').textContent = info[0];
     document.getElementById('hero-icon').textContent = info[1];
-    document.getElementById('feels').textContent = Math.round(c.apparent_temperature) + '°';
+    document.getElementById('feels').textContent = displayNumber(c.apparent_temperature) + '°';
     document.getElementById('humidity').textContent = c.relative_humidity_2m + '%';
     document.getElementById('wind').textContent = Math.round(c.wind_speed_10m) + ' km/h';
     document.getElementById('uv').textContent = (c.uv_index !== undefined && c.uv_index !== null) ? c.uv_index.toFixed(1) : '--';
+
+    // Sunrise / Sunset (daily arrays align; use first day)
+    if(data.daily && data.daily.sunrise && data.daily.sunset){
+      var sunrise = new Date(data.daily.sunrise[0]);
+      var sunset = new Date(data.daily.sunset[0]);
+      document.getElementById('sunrise').textContent = sunrise.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      document.getElementById('sunset').textContent = sunset.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    }
   }
 
   function renderHourly(data){
@@ -234,7 +280,7 @@
       card.className = 'hour-card';
       card.innerHTML = '<div class="t">' + t.toLocaleTimeString([], {hour:'2-digit'}) + '</div>' +
         '<div class="ic">' + info[1] + '</div>' +
-        '<div class="v">' + Math.round(data.hourly.temperature_2m[j]) + '°</div>';
+        '<div class="v">' + displayNumber(data.hourly.temperature_2m[j]) + '°</div>';
       strip.appendChild(card);
     }
   }
@@ -249,10 +295,15 @@
       card.className = 'day-card';
       card.innerHTML = '<div class="d">' + (i===0 ? 'Today' : date.toLocaleDateString(undefined,{weekday:'short'})) + '</div>' +
         '<div class="ic" title="' + info[0] + '">' + info[1] + '</div>' +
-        '<div><span class="hi">' + Math.round(data.daily.temperature_2m_max[i]) + '°</span><span class="lo">' + Math.round(data.daily.temperature_2m_min[i]) + '°</span></div>' +
+        '<div><span class="hi">' + displayNumber(data.daily.temperature_2m_max[i]) + '°</span><span class="lo">' + displayNumber(data.daily.temperature_2m_min[i]) + '°</span></div>' +
         '<div class="rain">💧 ' + data.daily.precipitation_probability_max[i] + '%</div>';
       grid.appendChild(card);
     });
+  }
+
+  function saveLast(locationName, lat, lon, data){
+    try{ localStorage.setItem('lastLocation', JSON.stringify({ locationName: locationName, lat: lat, lon: lon, ts: Date.now() })); }catch(e){}
+    window.__lastWeatherData = data; window.__lastLabel = locationName;
   }
 
   function loadByCoords(lat, lon, label){
@@ -263,9 +314,11 @@
         renderHourly(data);
         renderDaily(data);
         setStatus('Updated ' + new Date().toLocaleTimeString() + ' — showing ' + label);
+        saveLast(label, lat, lon, data);
       })
       .catch(function(err){
-        setStatus(err && err.message ? err.message : 'Something went wrong fetching weather data.', true);
+        if(err && err.name === 'AbortError') setStatus('Request timed out — please try again.', true);
+        else setStatus(err && err.message ? err.message : 'Something went wrong fetching weather data.', true);
       });
   }
 
@@ -274,7 +327,8 @@
     geocodeCity(name)
       .then(function(loc){ loadByCoords(loc.lat, loc.lon, loc.label); })
       .catch(function(err){
-        setStatus(err && err.message ? err.message : 'Could not find that city.', true);
+        if(err && err.name === 'AbortError') setStatus('Geocoding timed out — please try again.', true);
+        else setStatus(err && err.message ? err.message : 'Could not find that city.', true);
       });
   }
 
@@ -298,8 +352,34 @@
     );
   });
 
+  document.getElementById('share-btn').addEventListener('click', function(){
+    if(!window.__lastLabel) return setStatus('No location to share', true);
+    var q = encodeURIComponent(window.__lastLabel);
+    var url = location.origin + location.pathname + '?q=' + q;
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(url).then(function(){ setStatus('Link copied to clipboard'); }).catch(function(){ setStatus(url); });
+    } else {
+      setStatus(url);
+    }
+  });
+
+  function loadLastIfAny(){
+    var params = new URLSearchParams(location.search);
+    if(params.has('q')){ loadByCity(params.get('q')); return; }
+    var last = localStorage.getItem('lastLocation');
+    if(last){
+      try{
+        var obj = JSON.parse(last);
+        setStatus('Loading last viewed location…');
+        loadByCoords(obj.lat, obj.lon, obj.locationName);
+        return;
+      }catch(e){}
+    }
+    loadByCity('Jammu');
+  }
+
   // Initial load
-  loadByCity('Jammu');
+  loadLastIfAny();
 })();
 </script>
 </body>
